@@ -15,6 +15,7 @@
 
 #include <HostSharedData.h>
 #include <ReverseGameData.h>
+
 #include <windowsx.h>
 #include <console/Console.VariableHelpers.h>
 
@@ -26,12 +27,8 @@ static bool g_hasFocus = false;
 static bool g_hasCursor = false;
 bool g_keepInput = false;
 static bool g_hasOverriddenFocus = false;
-static bool g_isDui = false;
 extern bool g_mainUIFlag;
 POINT g_cursorPos;
-fwRefContainer<NUIWindow> focusWindow;
-CefRefPtr<CefBrowser> focusBrowser;
-
 
 bool isKeyDown(WPARAM wparam)
 {
@@ -42,12 +39,12 @@ bool isKeyDown(WPARAM wparam)
 
 static CefRefPtr<CefBrowser> GetFocusBrowser()
 {
-	return focusBrowser;
+	return nui::GetBrowser();
 }
 
 static fwRefContainer<NUIWindow> GetFocusWindow()
 {
-	return focusWindow;
+	return nui::GetWindow();
 }
 
 struct ScaleInfo
@@ -132,11 +129,6 @@ namespace nui
 		return (g_hasFocus || g_hasOverriddenFocus);
 	}
 
-	bool HasDuiFocus()
-	{
-		return g_isDui;
-	}
-
 	bool HasCursor()
 	{
 		return HasMainUI() || g_hasCursor;
@@ -149,27 +141,12 @@ namespace nui
 
 	void GiveFocus(const std::string& frameName, bool hasFocus, bool hasCursor)
 	{
-		g_isDui = frameName.find("nui_resource_") != std::string::npos; // Check frame name to see if it is DUI
-		if (g_isDui)
-		{
-			// Set focus to DUI
-			focusBrowser = GetNUIWindowBrowser(frameName); 
-			focusWindow = FindNUIWindow(frameName);
-		}
-		else
-		{
-			// Set focus to NUI
-			focusBrowser = GetBrowser();
-			focusWindow = GetWindow();
-		}
-
 		if (!HasFocus() && hasFocus)
 		{
 			g_nuiGi->SetGameMouseFocus(false);
 		}
 		else if (!hasFocus && HasFocus())
 		{
-			g_isDui = false;
 			g_nuiGi->SetGameMouseFocus(true);
 		}
 

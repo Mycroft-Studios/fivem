@@ -234,11 +234,6 @@ static InitFunction initFunction([] ()
 			return fakeCxt.GetResult<bool>();
 		}
 
-		void GiveFocus(const bool* keepInput)
-		{
-			nui::GiveFocus(m_autogenHandle, keepInput, false);
-		}
-
 		bool IsAvailable()
 		{
 			auto browser = nui::GetNUIWindowBrowser(m_autogenHandle);
@@ -404,10 +399,6 @@ static InitFunction initFunction([] ()
 		void InjectKeyUp(char* keyPressed)
 		{
 			KeyInput(keyPressed, false);
-
-		bool HasFocus()
-		{
-			return nui::HasDuiFocus();
 		}
 
 		void InjectMouseDown(const char* button)
@@ -492,10 +483,7 @@ static InitFunction initFunction([] ()
 		.AddMethod("SEND_DUI_MOUSE_WHEEL", &NUIWindowWrapper::InjectMouseWheel)
 		.AddMethod("SEND_DUI_KEY_DOWN", &NUIWindowWrapper::InjectKeyDown)
 		.AddMethod("SEND_DUI_KEY_UP", &NUIWindowWrapper::InjectKeyUp)
-		.AddMethod("SET_DUI_KEYBOARD_INPUT", &NUIWindowWrapper::GiveFocus)
-		.AddMethod("DUI_HAS_KEYBOARD_INPUT", &NUIWindowWrapper::HasFocus)	
 		.AddMethod("DESTROY_DUI", &NUIWindowWrapper::Destroy);
-
 
 	// this *was* a multiset before but some resources would not correctly pair set/unset and then be stuck in 'set' state
 	static std::unordered_set<std::string> focusVotes;
@@ -569,8 +557,7 @@ static InitFunction initFunction([] ()
 
 	fx::ScriptEngine::RegisterNativeHandler("IS_NUI_FOCUSED", [] (fx::ScriptContext& context)
 	{
-		const bool isFocused = !nui::HasDuiFocus() && nui::HasFocus();
-		context.SetResult(isFocused);
+		context.SetResult(nui::HasFocus());
 	});
 
 	fx::ScriptEngine::RegisterNativeHandler("IS_NUI_FOCUS_KEEPING_INPUT", [] (fx::ScriptContext& context)
