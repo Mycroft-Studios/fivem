@@ -75,32 +75,31 @@ static HookFunction hookFunction([]
 		// Test for a valid weapon component info pointer before de-referencing it.
 		static struct : jitasm::Frontend
 		{
-			intptr_t retFail;
-			intptr_t retSuccess;
+			uint8_t vtableOffset;
 
 			void Init(intptr_t location)
 			{
-				retFail = location + 14;
-				retSuccess = location + 6;
+				vtableOffset = *(uint8_t*)(location + 0x8);
 			}
 
 			void InternalMain() override
 			{
-				test(rbx, rbx);				// if ( rbx )
-				jz("fail");					// {
-											//
-				// * original code			//
-				mov(rax, qword_ptr[rbx]);	//
-											//		[run original code]
-				mov(rcx, rbx);				//
-				// * original code END		//
-											//
-				mov(rax, retSuccess);		//
-				jmp(rax);					//
-											// }
-				L("fail");					//
-				mov(rax, retFail);			//
-				jmp(rax);					//
+				test(rbx, rbx);								// if ( rbx )
+				jz("skip");									// {
+															//
+				// * original code                          //
+				mov(rax, qword_ptr[rbx]);					//
+															//        [run original code]
+				mov(rcx, rbx);								//
+															//
+				mov(rax, qword_ptr[rax + vtableOffset]);	//
+				call(rax);									//
+				// * original code END                      //
+															//
+															// }
+				L("skip");									//
+															//
+				ret();										//
 			}
 
 		} patchStub;
@@ -111,13 +110,14 @@ static HookFunction hookFunction([]
 		patchStub.Init(reinterpret_cast<intptr_t>(location));
 
 		/*
-		* nop:
-		* 
-		* mov rax, [rbx]
-		* mov rcx, rbx
-		*/
-		hook::nop(location, 6);
+		 * nop:
+		 *
+		 * mov rax, [rbx]
+		 * mov rcx, rbx
+		 * call    qword ptr [rax+38h]
+		 */
+		hook::nop(location, 9);
 
-		hook::jump_rcx(location, patchStub.GetCode());
+		hook::call(location, patchStub.GetCode());
 	}
 });

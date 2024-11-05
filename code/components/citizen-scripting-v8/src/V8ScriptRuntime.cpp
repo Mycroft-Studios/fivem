@@ -14,6 +14,7 @@
 #include <chrono>
 #include <sstream>
 #include <stack>
+#include <stdexcept>
 
 #include <CoreConsole.h>
 #include <SharedFunction.h>
@@ -208,8 +209,6 @@ private:
 
 	void* m_parentObject;
 
-	invoker::PointerField m_pointerFields[3];
-
 	// string values, which need to be persisted across calls as well
 	std::unique_ptr<String::Utf8Value> m_stringValues[50];
 
@@ -301,11 +300,6 @@ public:
 	inline OMPtr<IScriptHost> GetScriptHost()
 	{
 		return m_scriptHost;
-	}
-
-	inline invoker::PointerField* GetPointerFields()
-	{
-		return m_pointerFields;
 	}
 
 	inline const char* GetResourceName()
@@ -1005,9 +999,7 @@ struct V8ScriptNativeContext final : ScriptNativeContext
 {
 	V8ScriptNativeContext(uint64_t hash, V8ScriptRuntime* runtime, v8::Isolate* isolate);
 
-	void DoSetError(const char* msg) override;
-
-	bool PushArgument(v8::Local<v8::Value> arg);
+	void PushArgument(v8::Local<v8::Value> arg);
 
 	template<typename T>
 	v8::Local<v8::Value> ProcessResult(const T& value);
@@ -1019,16 +1011,11 @@ struct V8ScriptNativeContext final : ScriptNativeContext
 };
 
 V8ScriptNativeContext::V8ScriptNativeContext(uint64_t hash, V8ScriptRuntime* runtime, v8::Isolate* isolate)
-	: ScriptNativeContext(hash, runtime->GetPointerFields()), isolateScope(GetV8Isolate()), runtime(runtime), isolate(isolate), cxt(runtime->GetContext())
+	: ScriptNativeContext(hash), isolateScope(GetV8Isolate()), runtime(runtime), isolate(isolate), cxt(runtime->GetContext())
 {
 }
 
-void V8ScriptNativeContext::DoSetError(const char* msg)
-{
-	isolate->ThrowException(Exception::Error(String::NewFromUtf8(isolate, msg).ToLocalChecked()));
-}
-
-bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
+void V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 {
 	if (arg->IsNumber())
 	{
@@ -1092,7 +1079,7 @@ bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 
 		if (array->Length() < 2 || array->Length() > 4)
 		{
-			return SetError("arrays should be vectors (wrong number of values)");
+			throw ScriptError("arrays should be vectors (wrong number of values)");
 		}
 
 		if (array->Length() >= 2)
@@ -1102,13 +1089,11 @@ bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 
 			if (x == NAN || y == NAN)
 			{
-				return SetError("invalid vector array value");
+				throw ScriptError("invalid vector array value");
 			}
 
-			if (!Push(x) || !Push(y))
-			{
-				return false;
-			}
+			Push(x);
+			Push(y);
 		}
 
 		if (array->Length() >= 3)
@@ -1117,13 +1102,10 @@ bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 
 			if (z == NAN)
 			{
-				return SetError("invalid vector array value");
+				throw ScriptError("invalid vector array value");
 			}
 
-			if (!Push(z))
-			{
-				return false;
-			}
+			Push(z);
 		}
 
 		if (array->Length() >= 4)
@@ -1132,13 +1114,10 @@ bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 
 			if (w == NAN)
 			{
-				return SetError("invalid vector array value");
+				throw ScriptError("invalid vector array value");
 			}
 
-			if (!Push(w))
-			{
-				return false;
-			}
+			Push(w);
 		}
 	}
 	else if (arg->IsArrayBufferView())
@@ -1157,7 +1136,7 @@ bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 
 		if (!object->Get(cxt, String::NewFromUtf8(GetV8Isolate(), "__data").ToLocalChecked()).ToLocal(&data))
 		{
-			return SetError("__data field does not contain a number");
+			throw ScriptError("__data field does not contain a number");
 		}
 
 		if (!data.IsEmpty() && data->IsNumber())
@@ -1172,16 +1151,14 @@ bool V8ScriptNativeContext::PushArgument(v8::Local<v8::Value> arg)
 		}
 		else
 		{
-			return SetError("__data field does not contain a number");
+			throw ScriptError("__data field does not contain a number");
 		}
 	}
 	else
 	{
 		String::Utf8Value str(GetV8Isolate(), arg);
-		return SetError("invalid V8 value: %s", *str);
+		throw ScriptError("invalid V8 value: %s", *str);
 	}
-
-	return true;
 }
 
 template<typename T>
@@ -1290,39 +1267,15 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args, uin
 	// verify argument count
 	if (numArgs < baseArgs)
 	{
-		context.SetError("wrong argument count (needs at least a hash string)");
-		return;
+		throw context.ScriptError("wrong argument count (needs at least a hash string)");
 	}
 	
 	for (int i = baseArgs; i < numArgs; i++)
 	{
-		if (!context.PushArgument(args[i]))
-		{
-			return;
-		}
+		context.PushArgument(args[i]);
 	}
 
-	if (!context.PreInvoke())
-	{
-		return;
-	}
-
-	OMPtr<IScriptHost> scriptHost = runtime->GetScriptHost();
-
-	// invoke the native on the script host
-	if (!FX_SUCCEEDED(scriptHost->InvokeNative(context)))
-	{
-		char* error = "Unknown";
-		scriptHost->GetLastErrorText(&error);
-
-		context.SetError("Execution of native %016x in script host failed: %s", hash, error);
-		return;
-	}
-
-	if (!context.PostInvoke())
-	{
-		return;
-	}
+	context.Invoke(*runtime->GetScriptHost().GetRef());
 
 	// For a single result, return it directly.
 	// For multiple results, store them in an array.
@@ -1349,73 +1302,73 @@ static void V8_InvokeNative(const v8::FunctionCallbackInfo<v8::Value>& args, uin
 		}
 
 		++numResults;
-
-		return true;
 	});
 
 	// and set the return value(s)
 	args.GetReturnValue().Set(returnValue);
 }
 
+template<typename Func>
+static void V8_TryCatch(const v8::FunctionCallbackInfo<v8::Value>& args, Func&& func)
+{
+	v8::Local<v8::Value> exception;
+
+	try
+	{
+		return func(args);
+	}
+	catch (const std::exception& ex)
+	{
+		exception = Exception::Error(String::NewFromUtf8(args.GetIsolate(), ex.what()).ToLocalChecked());
+	}
+
+	// Throw the error after cleaning up the stack
+	args.GetIsolate()->ThrowException(exception);
+}
 
 static void V8_InvokeNativeString(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
-	String::Utf8Value hashString(GetV8Isolate(), args[0]);
-	uint64_t hash = strtoull(*hashString, nullptr, 16);
-	return V8_InvokeNative(args, hash, 1);
+	V8_TryCatch(args, [] (const v8::FunctionCallbackInfo<v8::Value>& args) {
+		String::Utf8Value hashString(GetV8Isolate(), args[0]);
+		uint64_t hash = strtoull(*hashString, nullptr, 16);
+		V8_InvokeNative(args, hash, 1);
+	});
 }
 
 static void V8_InvokeNativeHash(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
-	auto scrt = V8ScriptRuntime::GetCurrent();
-	uint64_t hash = (args[1]->Uint32Value(scrt->GetContext()).ToChecked() | (((uint64_t)args[0]->Uint32Value(scrt->GetContext()).ToChecked()) << 32));
-	return V8_InvokeNative(args, hash, 2);
+	V8_TryCatch(args, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
+		auto scrt = V8ScriptRuntime::GetCurrent();
+		uint64_t hash = (args[1]->Uint32Value(scrt->GetContext()).ToChecked() | (((uint64_t)args[0]->Uint32Value(scrt->GetContext()).ToChecked()) << 32));
+		V8_InvokeNative(args, hash, 2);
+	});
 }
 
-template<MetaField MetaField>
+template<MetaField field>
 static void V8_GetMetaField(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
-	args.GetReturnValue().Set(External::New(GetV8Isolate(), &ScriptNativeContext::s_metaFields[(int)MetaField]));
+	args.GetReturnValue().Set(External::New(GetV8Isolate(), ScriptNativeContext::GetMetaField(field)));
 }
 
-template<MetaField MetaField>
+template<MetaField field>
 static void V8_GetPointerField(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
 	V8ScriptRuntime* runtime = GetScriptRuntimeFromArgs(args);
 
-	auto pointerFields = runtime->GetPointerFields();
-	auto pointerFieldStart = &pointerFields[(int)MetaField];
+	auto arg = args[0];
+	uintptr_t value = 0;
 
-	static uintptr_t dummyOut;
-	PointerFieldEntry* pointerField = nullptr;
-	
-	for (int i = 0; i < _countof(pointerFieldStart->data); i++)
+	if constexpr (field == MetaField::PointerValueInt)
 	{
-		if (pointerFieldStart->data[i].empty)
-		{
-			pointerField = &pointerFieldStart->data[i];
-			pointerField->empty = false;
-			
-			auto arg = args[0];
-
-			if (MetaField == MetaField::PointerValueFloat)
-			{
-				float value = static_cast<float>(arg->NumberValue(runtime->GetContext()).ToChecked());
-
-				pointerField->value = *reinterpret_cast<uint32_t*>(&value);
-			}
-			else if (MetaField == MetaField::PointerValueInt)
-			{
-				intptr_t value = arg->IntegerValue(runtime->GetContext()).ToChecked();
-
-				pointerField->value = value;
-			}
-
-			break;
-		}
+		value = (uint64_t) arg->IntegerValue(runtime->GetContext()).ToChecked();
+	}
+	else if constexpr (field == MetaField::PointerValueFloat)
+	{
+		float fvalue = static_cast<float>(arg->NumberValue(runtime->GetContext()).ToChecked());
+		value = *reinterpret_cast<uint32_t*>(&value);
 	}
 
-	args.GetReturnValue().Set(External::New(GetV8Isolate(), (pointerField) ? static_cast<void*>(pointerField) : &dummyOut));
+	args.GetReturnValue().Set(External::New(GetV8Isolate(), ScriptNativeContext::GetPointerField(field, value)));
 }
 
 std::string SaveProfileToString(CpuProfile* profile);
@@ -1516,7 +1469,7 @@ static inline void CallHandler(void* handler, uint64_t nativeIdentifier, rage::s
 	}
 	__except (exceptionAddress = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress, EXCEPTION_EXECUTE_HANDLER)
 	{
-		throw std::exception(va("Error executing native 0x%016llx at address %p.", nativeIdentifier, exceptionAddress));
+		throw std::runtime_error(va("Error executing native 0x%016llx at address %p.", nativeIdentifier, exceptionAddress));
 	}
 }
 

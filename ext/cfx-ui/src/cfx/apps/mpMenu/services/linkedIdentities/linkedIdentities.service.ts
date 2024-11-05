@@ -1,7 +1,7 @@
 import { inject, injectable } from 'inversify';
 
 import { ServicesContainer } from 'cfx/base/servicesContainer';
-import { AppContribution } from 'cfx/common/services/app/app.extensions';
+import { AppContribution, registerAppContribution } from 'cfx/common/services/app/app.extensions';
 import { IdentitiesChangeEvent } from 'cfx/common/services/linkedIdentities/events';
 import { ILinkedIdentitiesService } from 'cfx/common/services/linkedIdentities/linkedIdentities.service';
 import { ILinkedIdentity } from 'cfx/common/services/linkedIdentities/types';
@@ -14,6 +14,8 @@ import { IConvarService } from '../convars/convars.service';
 
 export function registerLinkedIdentitiesService(container: ServicesContainer) {
   container.registerImpl(ILinkedIdentitiesService, LinkedIdentitiesService);
+
+  registerAppContribution(container, LinkedIdentitiesService);
 }
 
 @injectable()
@@ -50,7 +52,7 @@ export class LinkedIdentitiesService implements AppContribution, ILinkedIdentiti
     }
 
     try {
-      const json = await fetcher.json('https://lambda.fivem.net/api/ticket/identities', {
+      const json = await fetcher.json(`${__CFXUI_CNL_ENDPOINT__}api/ticket/identities`, {
         method: 'POST',
         body: serializeQueryString({
           token: ownershipTicket,

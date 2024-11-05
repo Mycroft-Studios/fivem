@@ -1515,7 +1515,7 @@ void ServerGameState::Tick(fx::ServerInstanceBase* instance)
 					if (entityClient && entityClient->GetNetId() == client->GetNetId())
 					{
 						// if this entity is owned by a server script, reassign to nobody and wait until someone else owns it
-						if (entity->IsOwnedByServerScript())
+						if (entity->ShouldServerKeepEntity())
 						{
 							ReassignEntity(entity->handle, {});
 						}
@@ -2812,10 +2812,9 @@ bool ServerGameState::MoveEntityToCandidate(const fx::sync::SyncEntityPtr& entit
 
 		if (candidates.empty()) // no candidate?
 		{
-			GS_LOG("no candidates for entity %d, assigning as unowned\n", entity->handle);
-
-			if (entity->IsOwnedByServerScript())
+			if (entity->ShouldServerKeepEntity())
 			{
+				GS_LOG("no candidates for entity %d, assigning as unowned\n", entity->handle);
 				ReassignEntity(entity->handle, {});
 			}
 			else
@@ -2924,8 +2923,7 @@ void ServerGameState::HandleClientDrop(const fx::ClientSharedPtr& client, uint16
 				{
 					ReassignEntity(entity->handle, firstOwner);
 				}
-				// we don't want to add these to the list to remove if they're set to be kept when orphaned
-				else if (entity->orphanMode != sync::KeepEntity)
+				else
 				{
 					toErase.insert(entity->handle);
 				}
@@ -3036,7 +3034,7 @@ void ServerGameState::ClearClientFromWorldGrid(const fx::ClientSharedPtr& target
 	SendWorldGrid(nullptr, targetClient);
 }
 
-void ServerGameState::ProcessCloneCreate(const fx::ClientSharedPtr& client, rl::MessageBuffer& inPacket, AckPacketWrapper& ackPacket)
+void ServerGameState::ProcessCloneCreate(const fx::ClientSharedPtr& client, rl::MessageBufferView& inPacket, AckPacketWrapper& ackPacket)
 {
 	uint16_t objectId = 0;
 	uint16_t uniqifier = 0;
@@ -3054,7 +3052,7 @@ void ServerGameState::ProcessCloneCreate(const fx::ClientSharedPtr& client, rl::
 	GS_LOG("%s: cl %d, id %d\n", __func__, client->GetNetId(), objectId);
 }
 
-void ServerGameState::ProcessCloneSync(const fx::ClientSharedPtr& client, rl::MessageBuffer& inPacket, AckPacketWrapper& ackPacket)
+void ServerGameState::ProcessCloneSync(const fx::ClientSharedPtr& client, rl::MessageBufferView& inPacket, AckPacketWrapper& ackPacket)
 {
 	uint16_t objectId = 0;
 	uint16_t uniqifier = 0;
@@ -3068,7 +3066,7 @@ void ServerGameState::ProcessCloneSync(const fx::ClientSharedPtr& client, rl::Me
 	GS_LOG("%s: cl %d, id %d\n", __func__, client->GetNetId(), objectId);
 }
 
-void ServerGameState::ProcessCloneTakeover(const fx::ClientSharedPtr& client, rl::MessageBuffer& inPacket)
+void ServerGameState::ProcessCloneTakeover(const fx::ClientSharedPtr& client, rl::MessageBufferView& inPacket)
 {
 	auto clientId = inPacket.Read<uint16_t>(16);
 	auto playerId = 0;
@@ -3112,7 +3110,7 @@ void ServerGameState::ProcessCloneTakeover(const fx::ClientSharedPtr& client, rl
 	}
 }
 
-void ServerGameState::ProcessCloneRemove(const fx::ClientSharedPtr& client, rl::MessageBuffer& inPacket, AckPacketWrapper& ackPacket)
+void ServerGameState::ProcessCloneRemove(const fx::ClientSharedPtr& client, rl::MessageBufferView& inPacket, AckPacketWrapper& ackPacket)
 {
 	auto playerId = 0;
 	auto objectId = inPacket.Read<uint16_t>(13);
@@ -3276,7 +3274,7 @@ auto ServerGameState::CreateEntityFromTree(sync::NetObjEntityType type, const st
 	return entity;
 }
 
-bool ServerGameState::ProcessClonePacket(const fx::ClientSharedPtr& client, rl::MessageBuffer& inPacket, int parsingType, uint16_t* outObjectId, uint16_t* outUniqifier)
+bool ServerGameState::ProcessClonePacket(const fx::ClientSharedPtr& client, rl::MessageBufferView& inPacket, int parsingType, uint16_t* outObjectId, uint16_t* outUniqifier)
 {
 	auto playerId = 0;
 	auto uniqifier = inPacket.Read<uint16_t>(16);
@@ -3724,60 +3722,64 @@ bool ServerGameState::ValidateEntity(EntityLockdownMode entityLockdownMode, cons
 	return allowed;
 }
 
-static std::tuple<std::optional<net::Buffer>, uint32_t> UncompressClonePacket(const std::vector<uint8_t>& packetData)
-{
-	net::Buffer readBuffer(packetData);
-	auto type = readBuffer.Read<uint32_t>();
 
-	if (type != HashString("netClones") && type != HashString("netAcks"))
+static std::tuple<uint32_t, int> UncompressClonePacket(const net::Span<char>& bufferData, const net::packet::ClientRoute& packetData)
+{
+	net::ByteReader readBuffer(packetData.data.GetValue().data(), packetData.data.GetValue().size());
+	uint32_t type;
+	if (!readBuffer.Field(type))
 	{
-		return { std::optional<net::Buffer>{}, type };
+		return { type, 0 };
+	}
+
+	if (type != net::force_consteval<uint32_t, HashString("netClones")> && type != net::force_consteval<uint32_t, HashString("netAcks")>)
+	{
+		return { type, 0 };
 	}
 
 	const static uint8_t dictBuffer[65536] = 
 	{
 #include <state/dict_five_20210329.h>
 	};
-	uint8_t bufferData[16384];
-	int bufferLength = LZ4_decompress_safe_usingDict(reinterpret_cast<const char*>(&readBuffer.GetData()[4]), reinterpret_cast<char*>(bufferData), readBuffer.GetRemainingBytes(), sizeof(bufferData), reinterpret_cast<const char*>(dictBuffer), std::size(dictBuffer));
+	int bufferLength = LZ4_decompress_safe_usingDict(reinterpret_cast<const char*>(readBuffer.GetData() + readBuffer.GetOffset()), bufferData.data(), readBuffer.GetRemaining(), bufferData.size(), reinterpret_cast<const char*>(dictBuffer), std::size(dictBuffer));
 
-	if (bufferLength <= 0)
-	{
-		return { std::optional<net::Buffer>{}, type };
-	}
-
-	return { { {bufferData, size_t(bufferLength)} }, type };
+	return { type, bufferLength };
 }
 
-void ServerGameState::ParseGameStatePacket(const fx::ClientSharedPtr& client, const std::vector<uint8_t>& packetData)
+void ServerGameState::ParseGameStatePacket(const fx::ClientSharedPtr& client, const net::packet::ClientRoute& packetData)
 {
 	if (!IsOneSync())
 	{
 		return;
 	}
 
-	auto [packet, type] = UncompressClonePacket(packetData);
+	char bufferData[16384];
+	net::Span bufferDataSpan (bufferData, sizeof(bufferData));
+	auto [type, length] = UncompressClonePacket(bufferDataSpan, packetData);
 
-	if (!packet)
+	if (length <= 0)
 	{
 		return;
 	}
 
+	net::ByteReader reader (reinterpret_cast<uint8_t*>(bufferData), length);
+
 	switch (type)
 	{
-	case HashString("netClones"):
-		ParseClonePacket(client, *packet);
+		case HashString("netClones"):
+			ParseClonePacket(client, reader);
 		break;
-	// #IFARQ
-	case HashString("netAcks"):
-		ParseAckPacket(client, *packet);
+		// #IFARQ
+		case HashString("netAcks"):
+			ParseAckPacket(client, reader);
 		break;
 	}
 }
 
-void ServerGameState::ParseAckPacket(const fx::ClientSharedPtr& client, net::Buffer& buffer)
+void ServerGameState::ParseAckPacket(const fx::ClientSharedPtr& client, net::ByteReader& buffer)
 {
-	rl::MessageBuffer msgBuf(buffer.GetData().data() + buffer.GetCurOffset(), buffer.GetRemainingBytes());
+	net::Span span (const_cast<uint8_t*>(buffer.GetData() + buffer.GetOffset()), buffer.GetRemaining());
+	rl::MessageBufferView msgBuf(span);
 
 	bool end = false;
 
@@ -3834,9 +3836,10 @@ void ServerGameState::ParseAckPacket(const fx::ClientSharedPtr& client, net::Buf
 }
 
 
-void ServerGameState::ParseClonePacket(const fx::ClientSharedPtr& client, net::Buffer& buffer)
+void ServerGameState::ParseClonePacket(const fx::ClientSharedPtr& client, net::ByteReader& buffer)
 {
-	rl::MessageBuffer msgBuf(buffer.GetData().data() + buffer.GetCurOffset(), buffer.GetRemainingBytes());
+	net::Span span (const_cast<uint8_t*>(buffer.GetData() + buffer.GetOffset()), buffer.GetRemaining());
+	rl::MessageBufferView msgBuf(span);
 
 	rl::MessageBuffer ackPacket;
 
@@ -6754,7 +6757,7 @@ inline auto GetHandler(fx::ServerInstanceBase* instance, const fx::ClientSharedP
 	return [instance, client, ev = std::move(ev)]()
 	{
 		auto evComponent = instance->GetComponent<fx::ResourceManager>()->GetComponent<fx::ResourceEventManagerComponent>();
-		return evComponent->TriggerEvent2(ev->GetName(), { }, fmt::sprintf("%d", client->GetNetId()), *ev);
+		return evComponent->TriggerEvent2(ev->GetName(), { }, std::to_string(client->GetNetId()), *ev);
 	};
 }
 
@@ -6776,7 +6779,7 @@ inline auto GetHandlerWithEvent(fx::ServerInstanceBase* instance, const fx::Clie
 	return [instance, client, ev = std::move(ev)]()
 	{
 		auto evComponent = instance->GetComponent<fx::ResourceManager>()->GetComponent<fx::ResourceEventManagerComponent>();
-		return evComponent->TriggerEvent2(ev->GetName(), { }, fmt::sprintf("%d", client->GetNetId()), *ev);
+		return evComponent->TriggerEvent2(ev->GetName(), { }, std::to_string(client->GetNetId()), *ev);
 	};
 }
 
@@ -7637,7 +7640,7 @@ static InitFunction initFunction([]()
 		// or maybe, beyond?
 		g_oneSyncLengthHack = instance->AddVariable<bool>("onesync_enableBeyond", ConVar_ReadOnly, false);
 
-		g_experimentalOneSyncPopulation = instance->AddVariable<bool>("sv_experimentalOneSyncPopulation", ConVar_None, false);
+		g_experimentalOneSyncPopulation = instance->AddVariable<bool>("sv_experimentalOneSyncPopulation", ConVar_None, true);
 		g_experimentalNetGameEventHandler = instance->AddVariable<bool>("sv_experimentalNetGameEventHandler", ConVar_None, false);
 
 		constexpr bool canLengthHack =
@@ -7716,7 +7719,7 @@ static InitFunction initFunction([]()
 
 		auto gameServer = instance->GetComponent<fx::GameServer>();
 
-		gameServer->GetComponent<fx::HandlerMapComponent>()->Add(HashRageString("msgNetGameEvent"), { fx::ThreadIdx::Sync, [=](const fx::ClientSharedPtr& client, net::Buffer& buffer)
+		gameServer->GetComponent<fx::HandlerMapComponent>()->Add(HashRageString("msgNetGameEvent"), { fx::ThreadIdx::Sync, [=](const fx::ClientSharedPtr& client, net::ByteReader& reader, fx::ENetPacketPtr packet)
 		{
 			// this should match up with SendGameEventRaw on client builds
 			// 1024 bytes is from the rlBuffer
@@ -7727,6 +7730,9 @@ static InitFunction initFunction([]()
 			// 1 from target size
 			// 1 from "is reply" field
 			constexpr int kMaxPacketSize = 1024 + 512 + 2 + 2 + 2 + 1 + 1;
+
+			net::Buffer buffer(reader.GetData(), reader.GetCapacity());
+			buffer.Seek(reader.GetOffset());
 
 			if (buffer.GetLength() > kMaxPacketSize)
 			{
